@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Scratch / temp working dirs
+.scratch/
+.archive/
+reports/
+fuzz_*
+.execprobe_*
+libfuzz_*
+arm_*
+paper/artifacts_latest/
+results/

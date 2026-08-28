@@ -1,0 +1,26 @@
+benchmark: exebench_hard
+opt: O0
+variant: stripall
+
+# the full arm: every oracle and feature enabled (equivalent to --arm retain_best).
+# orig_dict belongs in this list -- without it arm_label() does not match the retain_best preset
+# and the run is labelled as an ad-hoc arm instead, so the shipped config did not reproduce the
+# published full arm.
+oracle: [compiler, fuzzer]
+features: [typed_decode, typed_seeds, rich_observables, address_free, contract_gate, orig_dict, memory, keep_best]
+prompt: detailed      # instruction template: simple or detailed
+
+budget: 2000          # libfuzzer entropic runs per candidate per round
+diff_seeds: 200       # curated typed-seed count per round (only when the typed_seeds feature is on)
+max_divergences: 25   # divergences collected per round before the scan stops
+max_compiler_diags: 5       # d_c: compiler diagnostics shown as feedback
+max_feedback_divergences: 10  # d_f: counterexamples shown as feedback
+iters: 5              # K refinement rounds
+temperature: 0.0      # temperature for candidate selection, low is more deterministic
+per_sample_timeout: 2.0   # cpu seconds per (binary, input) execution
+candidate_opt: O0     # candidates always build at O0, matching the -O0 reference object
+compile_mode: object  # 'object' (gcc -c) or 'link' (A4D-style standalone link)
+replay_seeds: true    # test the curated typed seeds verbatim, not just as mining seeds
+
+model: gemma4:31b
+endpoint: http://127.0.0.1:11434

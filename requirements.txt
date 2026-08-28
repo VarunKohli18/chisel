@@ -1,0 +1,5 @@
+pyyaml
+requests
+zstandard
+matplotlib
+pytest
