@@ -4,7 +4,7 @@
 decompiler pseudocode — without test suites.
 
 Lift an x86_64 binary to pseudo-C with Ghidra, then let an LLM refine it into compilable,
-behaviorally-equivalent C through a feedback loop. Each round an **oracle** runs the candidate,
+behaviorally-similar C through a feedback loop. Each round an **oracle** runs the candidate,
 finds how it diverges from the original, and hands the LLM a short counterexample. The loop is
 stateless and test-suite-free: it sees only the pseudo-C, the original compiled to a reference
 binary, and inputs it generates itself. The dataset's I/O pairs are held out and used only to
