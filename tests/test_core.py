@@ -177,3 +177,46 @@ def test_feature_dependencies_and_clean_break():
     # clean break: the old overloaded flag is gone
     with pytest.raises(SystemExit):
         config.load(None, {"features": ["typed_inputs"]})
+
+
+# ---- libFuzzer mining survives an original that crashes on part of its input space ----
+
+def _obj(d, name, src):
+    (d / f"{name}.c").write_text(src)
+    subprocess.run(["gcc", "-c", str(d / f"{name}.c"), "-O2", "-o", str(d / f"{name}.o")],
+                   check=True)
+    return d / f"{name}.o"
+
+
+@pytest.mark.skipif(not (HAVE_GCC and fuzz.libfuzzer_available()), reason="clang/libFuzzer required")
+def test_mining_continues_past_an_input_the_original_crashes_on():
+    """libFuzzer runs the empty input first, which decodes to a NULL buffer that the original
+    dereferences. That crash must not end mining."""
+    d = Path(tempfile.mkdtemp())
+    src = ("int func0(int *a, int n){ if (n > 10) { if (a[1] > 5) return 1; return 2; } "
+           "return a[0]; }")
+    sig = signature.parse_signature("int func0(int *a, int n)")
+    orig = _obj(d, "o", src)
+    seeds = harness.seed_corpus(sig, n=3, seed=2)
+    mined = fuzz.libfuzzer_mine(src, sig, orig, budget=3000, seed_corpus=seeds)
+    assert len(set(mined) - set(seeds)) >= 3
+
+
+@pytest.mark.skipif(not (HAVE_GCC and fuzz.libfuzzer_available()), reason="clang/libFuzzer required")
+def test_the_diff_target_skips_an_original_crash_but_reports_a_candidate_crash():
+    sig = signature.parse_signature("int func0(int *a, int n)")
+    safe = "int func0(int *a, int n){ return a ? a[0] + n : n; }"
+    unsafe = "int func0(int *a, int n){ return a[0] + n; }"
+
+    def run(orig_src, cand_src):
+        d = Path(tempfile.mkdtemp())
+        pre = fuzz._prefix_original(_obj(d, "orig", orig_src), d)
+        (d / "cand.c").write_text(cand_src)
+        (d / "diff.c").write_text(harness.render_diff_target(sig))
+        assert fuzz._build_target(d, [str(d / "diff.c"), str(d / "cand.c")], [pre], d / "t") is None
+        (d / "in").write_bytes(b"")                      # decodes to a NULL buffer
+        return subprocess.run([str(d / "t"), str(d / "in")], capture_output=True,
+                              cwd=str(d)).returncode
+
+    assert run(unsafe, safe) == 0        # original out of contract: skipped
+    assert run(safe, unsafe) != 0        # candidate-only crash: reported

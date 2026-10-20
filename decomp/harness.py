@@ -293,9 +293,32 @@ size_t LLVMFuzzerCustomMutator(uint8_t *Data, size_t Size, size_t MaxSize, unsig
 
 # in-process libFuzzer differential target
 
+# Contains a crash inside one call. libFuzzer's own handlers are swapped out only for the
+# duration of a call and restored after it, so the crashes and aborts it should see still
+# reach it. The alternate stack lets a stack overflow be caught too.
+_FAULT_GUARD = """
+static sigjmp_buf _jb;
+static const int _FSIG[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGABRT };
+#define _NFSIG (sizeof(_FSIG) / sizeof(_FSIG[0]))
+static struct sigaction _fsaved[_NFSIG];
+static char _altstack[1 << 16];
+static void _on_fault(int s) { (void)s; siglongjmp(_jb, 1); }
+static void _fault_off(void) {
+    for (size_t i = 0; i < _NFSIG; ++i) sigaction(_FSIG[i], &_fsaved[i], 0);
+}
+static void _fault_on(void) {
+    static int alt = 0;
+    if (!alt) { stack_t ss = { .ss_sp = _altstack, .ss_size = sizeof _altstack, .ss_flags = 0 };
+                sigaltstack(&ss, 0); alt = 1; }
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_handler = _on_fault; sa.sa_flags = SA_ONSTACK | SA_NODEFER; sigemptyset(&sa.sa_mask);
+    for (size_t i = 0; i < _NFSIG; ++i) sigaction(_FSIG[i], &sa, &_fsaved[i]);
+}
+"""
+
 def _return_compare(sig: Signature, capture: bool) -> str:
     if capture:
-        return ("  if (_rc <= 0x100000ULL && _ro <= 0x100000ULL && _rc != _ro) __builtin_trap();")
+        return ("  if (_rc <= 0x100000ULL && _ro <= 0x100000ULL && _rc != _ro) abort();")
     if sig.is_void_return:
         return ""
     t = sig.return_type.replace(" ", "")
@@ -303,8 +326,8 @@ def _return_compare(sig: Signature, capture: bool) -> str:
         return ""   # pointer returns are compared by content in the replay gate
     if sig.return_type in SCALAR_FLOATS:
         return ("  { double a=(double)_rc, b=(double)_ro; double tol=1e-6*(1.0+(b<0?-b:b));"
-                " if (!(a==b) && !(a!=a && b!=b) && (a-b>tol || b-a>tol)) __builtin_trap(); }")
-    return "  if (_rc != _ro) __builtin_trap();"
+                " if (!(a==b) && !(a!=a && b!=b) && (a-b>tol || b-a>tol)) abort(); }")
+    return "  if (_rc != _ro) abort();"
 
 
 def render_diff_target(sig: Signature, *, typed_decode: bool = True, constants=None) -> str:
@@ -327,14 +350,15 @@ def render_diff_target(sig: Signature, *, typed_decode: bool = True, constants=N
     cand_args = ", ".join(call_args)
 
     if capture or not sig.is_void_return:
-        call_c = f"    {declared} _rc = cand_func0({cand_args});"
-        call_o = f"    {declared} _ro = orig_func0({orig_args});"
+        decl = f"    {declared} _rc = 0, _ro = 0;"
+        call_c, call_o = f"_rc = cand_func0({cand_args});", f"_ro = orig_func0({orig_args});"
     else:
-        call_c, call_o = f"    cand_func0({cand_args});", f"    orig_func0({orig_args});"
+        decl = ""
+        call_c, call_o = f"cand_func0({cand_args});", f"orig_func0({orig_args});"
 
     cmp_lines = [_return_compare(sig, capture)]
     for _name, buf, _base in buffers:
-        cmp_lines.append(f"    if (memcmp({buf}, {buf}_o, sizeof {buf})) __builtin_trap();")
+        cmp_lines.append(f"    if (memcmp({buf}, {buf}_o, sizeof {buf})) abort();")
     cmp = "\n".join(l for l in cmp_lines if l)
     mutator = _mutator_c(sig, constants) if typed_decode else ""
 
@@ -344,7 +368,9 @@ def render_diff_target(sig: Signature, *, typed_decode: bool = True, constants=N
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-{_TYPEDEFS}
+#include <signal.h>
+#include <setjmp.h>
+{_TYPEDEFS}{_FAULT_GUARD}
 extern {declared} cand_func0({forward});
 extern {declared} orig_func0({forward});
 
@@ -354,8 +380,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {{
     memcpy(_buf, Data, _len); _cur = 0;
 {chr(10).join(setup)}
 {chr(10).join(copies)}
-{call_c}
-{call_o}
+{decl}
+    /* The original first. An input it crashes on is outside its contract -- the replay
+       harness drops the same inputs -- so it is skipped rather than reported. Letting the
+       crash through would end the whole fuzzing run on the first such input. */
+    _fault_on();
+    if (sigsetjmp(_jb, 1) == 0) {{ {call_o} _fault_off(); }} else {{ _fault_off(); return 0; }}
+    /* A crash only the candidate has is a divergence. */
+    _fault_on();
+    if (sigsetjmp(_jb, 1) == 0) {{ {call_c} _fault_off(); }} else {{ _fault_off(); abort(); }}
 {cmp}
     return 0;
 }}
